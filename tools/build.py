@@ -8,7 +8,7 @@ from typing import TypeVar
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 ZIP_SHA = '4e298cab6c12d86cfc55565645f7e3ae11d3fb44677a93ca13991e7184ecec4e'
 DEMO_SHA = 'e65d638d6e70332b4c3193af8ac2044941ec0157d20e41e40233aac5b0c2c59f'
-VERSION = '1.8.6'  # major.minor.patch, single digits, shown as is (About and release tag)
+VERSION = '1.8.8'  # major.minor.patch, single digits, shown as is (About and release tag)
 BETA = 0  # a pre-release's beta number (1-9), 0 for the release itself
 REPO = 'DiamondBond/q2-pod'  # whose releases Network Update fetches (--update-repo) and release.py publishes
 # The updater's identity (firmware_v20.info and demo's version literal) must be 5 characters and
@@ -196,6 +196,12 @@ HOOKS = {
     'playermore_online': (0x539614, 'ringnav_online_match', 'online_match'),
     # Scan Folders' row click: a tap on a folder with no folders inside ticks it (scan_folders.c)
     'specfolder_click': (0x53f9b4, 'ringnav_specfolder_click', 'specfolder_click'),
+    # ... and its ticks kept from folder to folder: taken as stock leaves a folder (into one, back out), put back on
+    # the one it lists, dropped by Cancel and all scanned by the Scan button's click, which has no symbol
+    'specfolder_enter': (0x512e50, 'ringnav_specfolder_enter', 'specfolder_enter'),
+    'specfolder_back': (0x5131b8, 'ringnav_specfolder_back', 'specfolder_back'),
+    'on_cancelchoice_onclick': (0x53f624, 'ringnav_cancelchoice', 'cancelchoice'),
+    'specfolder_scan': (0x540658, 'ringnav_specfolder_scan', 'specfolder_scan'),
 }
 # The payload's stock_<name>_trampoline, the hooks' third element, resumes each hook past its 3-word PIC
 # prologue.
@@ -886,6 +892,10 @@ def english_ui(rel, data):
     check(not any(CJK.search(n[2].get('text', '')) for n in walk(root)), f'Chinese left in {rel}')
     return encode(root)
 
+# Fonts, the build's half of patch/script.c (docs/internals.md#themes, Scripts), down to classic_light_font:
+# what the bundled faces keep of each script (FACE_RANGES), what stock's font gains (font_quotes,
+# font_letters), and the faces' cuts and notices.
+
 # The stock font (Arial merged with a CJK font) gives curly quotes the CJK em advance, a wide gap
 # inside words wherever a tag has one; its cmaps map them to the straight glyphs instead. Its hearts
 # mix too: the ratings' ♡ (CJK: smaller, higher, the em advance) is fitted to Arial's ♥ box, both a wider advance.
@@ -910,6 +920,86 @@ def font_quotes(data):
     empty.coordinates.toInt()
     empty.recalcBounds(glyf)
     hmtx[cmap[0x2661]] = hmtx[cmap[0x2665]] = (hmtx[cmap[0x2665]][0] + 32, full.xMin)  # a gap between hearts
+    out = io.BytesIO()
+    font.save(out, reorderTables=False)
+    return out.getvalue()
+
+FACE_RANGES = (       # what the two bundled faces keep of their sources: a row per script
+    (0x20, 0x52f),    # Latin, Greek, Cyrillic
+    (0x1ea0, 0x1ef9), # Vietnamese's letters with tone marks
+    (0x2000, 0x21ff), # punctuation, arrows
+)
+# Letters stock's font lacks but can build from its own base letters and combining marks (font_letters):
+# stock draws one font with no fallback, so they were left out on every screen. A row per script.
+STOCK_LETTERS = (
+    (0x1ea0, 0x1ef9),  # Vietnamese's letters with tone marks
+    (0x1a0, 0x1a1),    # Ơ ơ
+    (0x1af, 0x1b0),    # Ư ư
+)
+# Stock's combining marks have no advance: their ink is centred MARK_CX units left of the pen.
+MARK_CX = -71
+MARK_GAP, MARK_GAP_CAP = 16, 8  # a first mark above sits this far over a lowercase or a capital base's top
+MARK_STACK = 3                  # a second mark stacked over the first
+MARK_BESIDE = (-6, 12)          # a second mark beside the first: from its right edge, x in and y up; the grave mirrored, on its left
+GRAVE_BESIDE = (-14, 24)        # the grave beside a circumflex: further in and higher, clear of the letter before it (đầu, Về)
+MARK_TOP = 256                  # no mark above passes stock's own Â
+HORN_ADVANCE = 14               # ơ ư: the horn widens its letter
+DOT_Y = 24                      # the dot below ỵ sits this far right, under y's stem
+
+def font_letters(data):
+    """STOCK_LETTERS that stock's font (data) lacks, added: each a composite glyph of the plain base
+    letter of its NFD (never stock's precomposed â ê ô ă, a different design from its ASCII and marks) and
+    each mark, at an offset from the base's box; i under a mark above is dotless ı. A letter already in
+    the font is left alone. head keeps its stock timestamp, as in font_quotes."""
+    # ponytail: marks sit at fixed offsets from the base's box (stb_truetype reads no GPOS), tuned on stock
+    # V1.36's font; a new base font needs them looked at again.
+    import unicodedata
+    from fontTools.pens.ttGlyphPen import TTGlyphPen
+    from fontTools.ttLib import TTFont
+    font = TTFont(io.BytesIO(data), recalcTimestamp=False)
+    glyf, hmtx, cmap = font['glyf'], font['hmtx'], font.getBestCmap()
+    horn, dot, grave, circumflex, tilde = '\u031b', '\u0323', '\u0300', '\u0302', '\u0303'
+    for m in (circumflex, dot):
+        g = glyf[cmap[ord(m)]]
+        check(g.xMin + g.xMax == 2 * MARK_CX, 'Unexpected combining marks')
+    o_top = glyf[cmap[ord('o')]].yMax
+    for cp in (u for lo, hi in STOCK_LETTERS for u in range(lo, hi + 1) if u not in cmap):
+        base, *marks = list(unicodedata.normalize('NFD', chr(cp)))
+        if base == 'i' and set(marks) - {horn, dot}: base = '\u0131'
+        if any(ord(c) not in cmap for c in (base, *marks)): continue  # left to the check below
+        name = cmap[ord(base)]
+        b = glyf[name]
+        top, cx, advance = b.yMax, (b.xMin + b.xMax) / 2 - MARK_CX, hmtx[name][0]
+        pen, first = TTGlyphPen(glyf), None
+        pen.addComponent(name, (1, 0, 0, 1, 0, 0))
+        for m in marks:
+            g = glyf[cmap[ord(m)]]
+            if m == horn:
+                x, y = advance, top - o_top
+                advance += HORN_ADVANCE
+            elif m == dot:
+                x, y = cx + (DOT_Y if base == 'y' else 0), 0
+            else:
+                check(g.yMin > 0, f'No rule for U+{ord(m):04X}')  # what follows places a mark above
+                if first is None:
+                    x, y = cx, top + (MARK_GAP_CAP if base.isupper() else MARK_GAP) - g.yMin
+                elif m != tilde and (first[0] == circumflex or base.isupper()):
+                    # ponytail: Ằ's grave keeps the mirror, level with Ắ's acute: any higher it runs into the breve's horn
+                    dx, dy = GRAVE_BESIDE if (m, first[0]) == (grave, circumflex) else MARK_BESIDE
+                    x = first[4] - dx - g.xMax if m == grave else first[1] + dx - g.xMin
+                    y = first[2] + dy - g.yMin
+                else:
+                    x, y = cx, first[3] + MARK_STACK - g.yMin
+                y = min(y, MARK_TOP - g.yMax)
+                if first is None: first = (m, x + g.xMax, y + g.yMin, y + g.yMax, x + g.xMin)
+            pen.addComponent(cmap[ord(m)], (1, 0, 0, 1, round(x), round(y)))
+        letter = f'uni{cp:04X}'
+        glyf[letter] = glyph = pen.glyph()
+        glyph.recalcBounds(glyf)
+        hmtx[letter] = (advance, glyph.xMin)
+        for table in font['cmap'].tables:
+            if table.isUnicode(): table.cmap[cp] = letter
+    check(all(u in font.getBestCmap() for lo, hi in STOCK_LETTERS for u in range(lo, hi + 1)), "Font without its letters' parts")
     out = io.BytesIO()
     font.save(out, reorderTables=False)
     return out.getvalue()
@@ -944,8 +1034,8 @@ def play_mark(font):
         if table.isUnicode(): table.cmap[PLAY_MARK] = name
 
 def subset_font(src, family, ranges_macro, notice=None):
-    """src given a play mark (play_mark), then cut to its Latin, Greek, Cyrillic, punctuation and that
-    mark, renamed family (its own name is the font's reserved name under OFL and GUST alike): the font's
+    """src given a play mark (play_mark), then cut to FACE_RANGES (its Latin, Vietnamese, Greek, Cyrillic
+    and punctuation) and that mark, renamed family (its own name is the font's reserved name under OFL and GUST alike): the font's
     bytes and ranges_macro listing exactly what it keeps. notice, if any, goes in its description (name
     ID 10)."""
     from fontTools import subset
@@ -953,7 +1043,7 @@ def subset_font(src, family, ranges_macro, notice=None):
     font = TTFont(src, recalcTimestamp=False)
     old = font['name'].getDebugName(1)
     label = ranges_macro.split('_')[0].title()
-    have = sorted(u for u in font.getBestCmap() if 0x20 <= u < 0x530 or 0x2000 <= u < 0x2200)
+    have = sorted(u for u in font.getBestCmap() if any(a <= u <= b for a, b in FACE_RANGES))
     play_mark(font)
     have.append(PLAY_MARK)
     options = subset.Options()
@@ -985,8 +1075,8 @@ def subset_font(src, family, ranges_macro, notice=None):
         else: runs.append([u, u])
     return out.getvalue(), f'#define {ranges_macro} {{' + ','.join(f'0x{u:x}' for r in runs for u in r) + '}'
 
-# The bold face (navigation.c theme_font; Modern's Now Playing title, Classic's fallback where its own lacks a character): Liberation Sans Bold (OFL, assets/fonts), cut to its Latin,
-# Greek, Cyrillic and punctuation, with a play mark (play_mark). BOLD_RANGES, from the same cmap, lists exactly what it keeps, so a
+# The bold face (navigation.c theme_font; Modern's Now Playing title, Classic's fallback where its own lacks a character): Liberation Sans Bold (OFL, assets/fonts), cut to its Latin
+# (Vietnamese's letters with tone marks too), Greek, Cyrillic and punctuation, with a play mark (play_mark). BOLD_RANGES, from the same cmap, lists exactly what it keeps, so a
 # label holding anything else (CJK, say) keeps the stock font.
 BOLD_TTF = 'release/assets/default/raw/fonts/bold.ttf'
 
@@ -998,7 +1088,7 @@ def bold_font():
 CLASSIC_LIGHT_TTF = 'release/assets/default/raw/fonts/classic-light.ttf'
 # OFL 2 asks each copy to hold its licence, and the subsets' name tables don't: these ship beside the fonts
 FONT_NOTICES = ('LiberationSans-OFL.txt', 'GUST-FONT-LICENSE.txt', 'README-classic-light.txt')
-CLASSIC_LIGHT_NOTICE = ('Modified version of TeX Gyre Heros Bold 2.004: cut to part of its Latin and Greek and its punctuation, its layout features to frac, liga and locl, a play mark added at U+25B6, and renamed. '
+CLASSIC_LIGHT_NOTICE = ("Modified version of TeX Gyre Heros Bold 2.004: cut to part of its Latin, including Vietnamese's letters with tone marks, part of its Greek, and its punctuation, its layout features to frac, liga and locl, a play mark added at U+25B6, and renamed. "
                'The original: https://www.gust.org.pl/projects/e-foundry/tex-gyre/heros')
 
 def classic_light_font():
@@ -1318,6 +1408,8 @@ FUNCTIONS = {
  'toolsLoadDirectory': ('int', 'const char *'),
  'toolsCheckTypeDeque': ('int', 'void *, int'),
  'get_specfolderurl': ('void', 'int, char *, int'),
+ 'get_specfoldersize': ('int', 'void'),  # the folders Scan Folders lists
+ 'clear_specfoldervariate': ('void', 'void'),  # frees that list, its path and its scroll stack
  # Queue menu rows (navigation.c): artist/composer/genre queries, My Fav, the batch selection record
  'getMusicBySonger': ('int', 'const char *'),
  'getMusicByAlbumArtist': ('int', 'const char *'),
@@ -1521,6 +1613,7 @@ PRIVATE_FUNCTIONS = {
     "netservice_row": HOOKS['netservice_row'][0],  # Network service's DLNA, AirPlay and Wi-Fi transfer
     "playermore_online": HOOKS['playermore_online'][0],  # More's Download Cover & Lyrics: (window)
     "specfolder_click": HOOKS['specfolder_click'][0],  # Scan Folders' row click
+    "specfolder_scan": HOOKS['specfolder_scan'][0],  # ... and its Scan button's (btn_startscan)
 }
 GLOBALS = ['tidal_albuminfo_thread_run', 'tidal_collection_thread_run',  # 2: a Tidal list loaded
            'savestartbt', 'transposition', 'tidalfurlstart',  # a stream to start paused; 1 arms Now Playing's online tick (tidal.c app_start)
@@ -1544,7 +1637,8 @@ GLOBALS = ['tidal_albuminfo_thread_run', 'tidal_collection_thread_run',  # 2: a 
            # toggling it (wifi_initstatus 0, wifi_connectstatus not 1, connecting), Network service's
            # AirPlay and DLNA, SyncLink (2: over Wi-Fi) and its session, Wi-Fi transfer and a pending time sync
            'g_wififlag', 'wifi_initstatus', 'wifi_connectstatus', 'g_airplayflag', 'g_dlnaflag',
-           'g_synclinkflag', 'g_syncLink_status', 'g_wifitransport_flag', 'g_syncnettime_flag']
+           'g_synclinkflag', 'g_syncLink_status', 'g_wifitransport_flag', 'g_syncnettime_flag',
+           'g_allselect_flag']  # a multi-select page's select-all picture: 1 with every row ticked (scan_folders.c)
 # Audited stock browsing state, deque pointers, art locks, the status bar widget
 # (system_bar_init stores it), the playing cover's track path and the playing track's tags as
 # player_get_id3info parsed them; sizes are checked against the ELF.
@@ -1604,7 +1698,7 @@ FLAGS = ['--target=mipsel-linux-gnu','-march=mips32r2','-mabi=32','-mfp64',
          '-Wshadow','-Wimplicit-int-conversion','-Wconditional-uninitialized','-Wmissing-variable-declarations',
          '-Wvla','-Wundef']
 # navigation.c and the files split out of it (patch/navigation.h), each its own object, linked in this order.
-NAVIGATION = ['navigation.c', 'theme_engine.c', 'playlists.c', 'classic_pages.c', 'home.c', 'np_bar.c', 'volume.c', 'smart_wifi.c', 'system.c', 'usb_charge.c', 'tags.c', 'scrobble_ui.c', 'library_lists.c', 'durations.c', 'font_weight.c', 'coverflow_position.c', 'ratings.c', 'scan_folders.c', 'folder_delete.c', 'battery.c', 'np_lyrics.c', 'quick_settings.c', 'clock.c', 'queue_menu.c']
+NAVIGATION = ['navigation.c', 'theme_engine.c', 'playlists.c', 'classic_pages.c', 'home.c', 'np_bar.c', 'volume.c', 'smart_wifi.c', 'system.c', 'usb_charge.c', 'tags.c', 'scrobble_ui.c', 'library_lists.c', 'durations.c', 'script.c', 'coverflow_position.c', 'ratings.c', 'scan_folders.c', 'folder_delete.c', 'battery.c', 'np_lyrics.c', 'quick_settings.c', 'clock.c', 'queue_menu.c']
 
 def compile_payload(out):  # pragma: no mutate block
     """Compile and link the payload."""
@@ -2173,7 +2267,7 @@ def build(zip_path, out, logo, dev=False, repo=REPO, stock_flac=False):  # pragm
         line = need(re.search(rb'^'+re.escape(path.encode())+rb' R .+\n', p, re.M), f'Missing stock inode {path}')
         removed.append(line.group().split()[:6])
         p = p[:line.start()]+p[line.end():]
-    for path, fix, name in ((TAG_C, patch_m4b_cover, 'libtag_c.so.2.0.1'), (FONT, font_quotes, 'default.ttf'),
+    for path, fix, name in ((TAG_C, patch_m4b_cover, 'libtag_c.so.2.0.1'), (FONT, lambda d: font_letters(font_quotes(d)), 'default.ttf'),
                             *((p, lambda d, p=p: patch_web(p, d), p.rsplit('/', 1)[-1]) for p in WEB)):
         original = cat(path)
         data = fix(original)
