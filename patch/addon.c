@@ -829,6 +829,8 @@ static struct {
     unsigned seen;       /* time_now_ms of the last input */
     unsigned held, term; /* when Return went down, when TERM went (0: neither) */
     char path[48];       /* the game's socket */
+    void *kb_edit;
+    int kb_active, kb_done;
 } gm __attribute__((section(".scratch")));
 
 int addon_games(void) { return addon_scan(), ap.games; }
