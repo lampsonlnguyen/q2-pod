@@ -943,8 +943,15 @@ static int game_start(app_t *a) {
     gm.audio = a->audio;
     gm.sock = socket(1, 1, 0); /* AF_UNIX, SOCK_DGRAM (MIPS numbering) */
     gm.seen = time_now_ms();
-    gm.held = gm.term = gm.eat = 0;
+    gm.held = gm.term = gm.eat = gm.kb_active = gm.kb_done = 0;
+    gm.kb_edit = 0;
     tk_snprintf(gm.path, sizeof gm.path, "/tmp/q2-%s.input.sock", a->id);
+    unlink(WEATHER_KB_REQ);
+    unlink(WEATHER_KB_CAP);
+    if (!tk_strcmp(a->id, "weather")) {
+        FILE *cap = fopen(WEATHER_KB_CAP, "wb");
+        if (cap) fclose(cap);
+    }
     __sync_lock_test_and_set(&wheel_travel, 0);
     wheel_raw = 1;
     return 1;
@@ -970,6 +977,7 @@ int addon_game_input(void *e) {
     if (keyish && key == KEY_RETURN && gm.eat) /* the held Return's repeats and release */
         return gm.eat = type != EVT_KEY_UP, 1;
     if (!gm.pid) return 0;
+    if (gm.kb_active) return 0; /* native Q2 input method owns input */
     if (!gm.audio && keyish && (key == KEY_PLAY || key == KEY_BACK_BTN || key == KEY_FWD_BTN))
         return 0;
     if (keyish && key == KEY_RETURN)
@@ -999,7 +1007,9 @@ int addon_game_input(void *e) {
 static void game_poll(void) {
     int status = 0;
     if (!gm.pid) return;
-    if (waitpid(gm.pid, &status, 1)) { /* WNOHANG: it has ended */
+    if (waitpid(gm.pid, &status, 1)) {
+        weather_keyboard_cleanup();
+        unlink(WEATHER_KB_CAP); /* WNOHANG: it has ended */
         close(gm.sock);
         /* a jack or USB change meanwhile ran stock's player_save_start(1): its start failed
          * (ringnav_start_player) but its pause stuck on nothing, so Play would do nothing */
@@ -1010,6 +1020,11 @@ static void game_poll(void) {
         if (status == 127 << 8) toast("It couldn't start"); /* the child's execl failed */
         return;
     }
+    if (gm.kb_done) {
+        weather_keyboard_cleanup();
+        widget_invalidate_force(window_manager(), 0);
+    }
+    weather_keyboard_open();
     unsigned now = (unsigned)time_now_ms();
     /* signed: a stamp can be just after now (| 1 rounds up, game_end reads the clock again) */
     if (gm.held && (int)(now - gm.held) >= GAME_HOLD_MS) gm.held = 0, gm.eat = 1, game_end();
