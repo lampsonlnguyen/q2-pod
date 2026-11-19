@@ -986,6 +986,11 @@ static void game_poll(void) {
  * storage counts once it starts again: the cable holds the radio meanwhile, and an app deleted from
  * the computer, which never starts again, holds nothing. */
 int addon_running(void) {
+    /* Weather is a full-screen Library card app (game=1) and therefore has
+     * no persistent addon socket. Treat that particular running game as a
+     * network user so Smart Wi-Fi wakes it, while offline games stay quiet.
+     * game_poll() clears gm.pid on exit, releasing Wi-Fi's idle timer. */
+    if (gm.pid && !tk_strcmp(gm.path, "/tmp/q2-weather.input.sock")) return 1;
     for (int i = 0; i < ap.n; ++i)
         if (ap.a[i].launched || ap.a[i].restart) return 1;
     return 0;
