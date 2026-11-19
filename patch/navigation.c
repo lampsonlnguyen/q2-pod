@@ -172,6 +172,8 @@ extern void coverflow_paint(void *w, void *canvas), photos_paint(void *w, void *
     photos_open(const char *root), books_paint(void *w, void *canvas), books_open(const char *root),
     video_poll(void);
 extern int books_key(void *top, unsigned key), video_on(void), books_video(const char *path);
+extern int crosspod_on(void), crosspod_input(void *e);
+extern void crosspod_poll(void);
 extern void games_paint(void *w, void *canvas);
 extern void spot_poll(void), spot_paint(void *w, void *canvas), *spot_art(void);
 extern int un_hold(void *top);
@@ -8570,6 +8572,7 @@ int ringnav_sleep(void *loop) {
     headset_eq_poll();
     bt_volume_poll();
     video_poll();
+    crosspod_poll();
     spot_poll();
     radio_poll();
     tidal_poll();
@@ -8823,6 +8826,7 @@ int ringnav_input(void *wm, void *e) {
         if (e && I(e, EVENT_TYPE) == EVT_KEY_UP) video_key((unsigned)I(e, EVENT_KEY));
         return 0;
     }
+    if (crosspod_input(e)) return 0;
     if (addon_game_input(e)) return 0;
     if (type >= EVT_POINTER_FIRST && type <= EVT_POINTER_ABORT) { /* a finger (stale_heal) */
         st.touch_at = st.last_input;
@@ -8876,7 +8880,7 @@ int ringnav_input(void *wm, void *e) {
  * first lit pass repaints the whole screen (ringnav_sleep; docs/internals.md Battery). */
 int ringnav_wm_paint(void *wm) {
     if (wm && !g_backlight_status && !window_manager_is_animating(wm)) return 0; /* RET_OK */
-    int away = video_on() || addon_game_on();
+    int away = video_on() || addon_game_on() || crosspod_on();
     void *vt = wm && !away ? P(wm, 0x94) : (void *)0;
     int (*paint)(void *) = vt ? (int (*)(void *))P(vt, 0xc) : (int (*)(void *))0;
     return paint ? paint(wm) : away ? 0 : 0x10; /* RET_BAD_PARAMS, as stock */
