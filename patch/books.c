@@ -622,10 +622,110 @@ static int poll(const void *unused) {
     return 0;
 }
 
+/* CrossPod: standalone reader process, deliberately separate from the card game manager.
+ * When the executable is not installed the existing Q2 Pod reader stays unchanged.
+ * The child receives the selected absolute book path as argv[1] and Q2 input over
+ * /tmp/q2-crosspod.input.sock (AF_UNIX SOCK_DGRAM), using the established Q2
+ * key/touch/wheel protocol. Its renderer alone owns /dev/fb0 while it runs.
+ * This hook does not import any ESP32 firmware or replace the Books shelf. */
+#define CROSSPOD_BIN "/mnt/mmc/.crosspod/crosspod"
+#define CROSSPOD_SOCK "/tmp/q2-crosspod.input.sock"
+static struct {
+    int pid, sock;
+    int failed;
+} cp __attribute__((section(".scratch")));
+
+static int to_reader(const void *unused); /* stock fallback when child cannot exec */
+
+int crosspod_on(void) { return cp.pid > 0; }
+
+static int crosspod_start(const char *path) {
+    if (!path || cp.pid || access(CROSSPOD_BIN, 1)) return 0;
+    /* Only the Book shelf's EPUB/TXT files are sent to CrossPod. */
+    if (book_kind(path) != 1 && book_kind(path) != 2) return 0;
+    int pid = fork();
+    if (!pid) {
+        child_oom_first();
+        execl(CROSSPOD_BIN, CROSSPOD_BIN, path, (char *)0);
+        child_exit(127);
+    }
+    if (pid <= 0) return 0;
+    cp.pid = pid;
+    cp.sock = socket(1, 1, 0);
+    if (cp.sock < 0) {
+        /* Reader cannot be controlled; terminate it and retain stock fallback. */
+        kill(cp.pid, 15);
+        waitpid(cp.pid, 0, 0);
+        cp.pid = 0;
+        return 0;
+    }
+    __sync_lock_test_and_set(&wheel_travel, 0);
+    wheel_raw = 1;
+    cp.failed = 0;
+    return 1;
+}
+
+/* Called by ringnav_input before stock touches the event while CrossPod is up. */
+int crosspod_input(void *e) {
+    if (!cp.pid) return 0;
+    if (!e) return 1;
+    const unsigned type = (unsigned)I(e, EVENT_TYPE);
+    const unsigned key = (unsigned)I(e, EVENT_KEY);
+    if (type == EVT_KEY_LONG && key == KEY_RETURN) {
+        /* Emergency quit when a reader has stopped responding to datagrams. */
+        kill(cp.pid, 15);
+        return 1;
+    }
+    char message[48] = {0};
+    if (type == EVT_KEY_DOWN || type == EVT_KEY_UP)
+        tk_snprintf(message, sizeof message, "k %s %u",
+                    type == EVT_KEY_UP ? "u" : "d", key);
+    else if ((type >= EVT_POINTER_DOWN - 1 && type <= EVT_POINTER_UP_BEFORE) ||
+             type == EVT_POINTER_ABORT) {
+        const char *what = type == EVT_POINTER_ABORT || type >= EVT_POINTER_UP_BEFORE - 1 ? "u"
+                           : type >= EVT_POINTER_MOVE_BEFORE - 1                         ? "m"
+                                                                                          : "d";
+        /* Panel and landscape framebuffer coordinates match Q2 Pod's game protocol. */
+        tk_snprintf(message, sizeof message, "t %s %d %d", what,
+                    I(e, EVENT_Y), 319 - I(e, EVENT_X));
+    }
+    if (message[0]) dgram_send(&cp.sock, CROSSPOD_SOCK, message, strlen(message));
+    return 1;
+}
+
+/* Called each UI iteration; nonblocking, so the stock Books list stays responsive. */
+void crosspod_poll(void) {
+    if (!cp.pid) return;
+    int status = 0;
+    int result = waitpid(cp.pid, &status, 1); /* Q2's waitpid(WNOHANG) wrapper */
+    if (result) {
+        close(cp.sock);
+        cp.sock = -1;
+        cp.pid = 0;
+        wheel_raw = 0;
+        __sync_lock_test_and_set(&wheel_travel, 0);
+        widget_invalidate_force(window_manager(), 0);
+        if (result > 0 && status == (127 << 8) && bk.page && bk.screen != READER) {
+            /* Missing interpreter, missing shared library or invalid executable:
+             * fall back to Q2 Pod's built-in reader for this selected book. */
+            to_reader(0);
+        }
+        return;
+    }
+    const int travel = __sync_lock_test_and_set(&wheel_travel, 0);
+    if (travel) {
+        char message[24];
+        tk_snprintf(message, sizeof message, "w %d", travel);
+        dgram_send(&cp.sock, CROSSPOD_SOCK, message, strlen(message));
+    }
+    reset_poweroptions_timer(1, 1, 1);
+}
+
 /* Book target: its text, or an EPUB's made first on the worker. */
 static int to_reader(const void *unused) {
     bk.timer = 0;
     const char *path = bk.path[bk.current = bk.target];
+    if (crosspod_start(path)) return 0;
     bk.key = fnv(FNV_SEED, (const unsigned char *)path);
     bk.key |= !bk.key;
     bk.screen = READER;
