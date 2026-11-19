@@ -4,6 +4,7 @@
  * turning pages. The page last read is kept per book in BOOK_MARKS. */
 #include "offsets.inc"
 #include "peq.h"
+#include "playback.h"
 #ifndef PEQ_HOST
 #include "stock.h"
 #endif
