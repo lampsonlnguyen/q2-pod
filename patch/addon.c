@@ -833,6 +833,54 @@ static struct {
     int kb_active, kb_done;
 } gm __attribute__((section(".scratch")));
 
+
+/* Full-screen Weather requests the stock Wi-Fi/T9 keyboard through a marker.
+ * The firmware UI owns the edit widget; Weather receives the typed UTF-8
+ * result as a datagram and never paints a separate keyboard. */
+#define WEATHER_KB_REQ "/tmp/q2-weather.keyboard.request"
+#define WEATHER_KB_CAP "/tmp/q2-weather.keyboard.available"
+
+static int weather_keyboard_finished(void *ctx, void *event) {
+    (void)event;
+    if (!gm.kb_active || gm.kb_done || !gm.kb_edit) return 0;
+    char msg[128] = "s ";
+    if (ctx && widget_get_text_utf8(gm.kb_edit, msg + 2, sizeof msg - 2)) msg[2] = 0;
+    for (char *p = msg + 2; *p; ++p)
+        if (*p == '\r' || *p == '\n' || *p == '\t') *p = ' ';
+    dgram_send(&gm.sock, gm.path, msg, strlen(msg));
+    gm.kb_done = 1;
+    return 0;
+}
+
+static void weather_keyboard_open(void) {
+    if (gm.kb_active || !gm.pid ||
+        tk_strcmp(gm.path, "/tmp/q2-weather.input.sock") ||
+        access(WEATHER_KB_REQ, 0)) return;
+    unlink(WEATHER_KB_REQ);
+    void *win = window_manager_get_top_window(window_manager());
+    if (!win) return;
+    gm.kb_edit = edit_create(win, "text", 2, 26);
+    if (!gm.kb_edit) return;
+    gm.kb_active = 1;
+    gm.kb_done = 0;
+    t9_box(win, gm.kb_edit, "Search city");
+    widget_on(gm.kb_edit, EVT_IM_ACTION, weather_keyboard_finished, (void *)1);
+    widget_on(gm.kb_edit, EVT_BLUR, weather_keyboard_finished, (void *)0);
+    widget_set_focused(gm.kb_edit, 1);
+}
+
+static void weather_keyboard_cleanup(void) {
+    if (gm.kb_edit) {
+        void *edit = gm.kb_edit;
+        gm.kb_done = 1;
+        gm.kb_edit = 0;
+        widget_set_focused(edit, 0);
+        widget_destroy(edit);
+    }
+    gm.kb_active = gm.kb_done = 0;
+    unlink(WEATHER_KB_REQ);
+}
+
 int addon_games(void) { return addon_scan(), ap.games; }
 int addon_games_last(void) { return ap.games; }
 const char *addon_game_name(int k) { return k >= 0 && k < ap.games ? ap.a[ap.game[k]].name : 0; }
