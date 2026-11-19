@@ -631,7 +631,7 @@ static int poll(const void *unused) {
 #define CROSSPOD_BIN "/mnt/mmc/.crosspod/crosspod"
 #define CROSSPOD_SOCK "/tmp/q2-crosspod.input.sock"
 static struct {
-    int pid, sock;
+    int pid, sock, bypass_once;
 } cp __attribute__((section(".scratch")));
 
 static int to_reader(const void *unused); /* stock fallback when child cannot exec */
@@ -647,6 +647,7 @@ static void crosspod_signal(int pid, int force) {
 int crosspod_on(void) { return cp.pid > 0; }
 
 static int crosspod_start(const char *path) {
+    if (cp.bypass_once) return cp.bypass_once = 0, 0;
     if (!path || cp.pid || access(CROSSPOD_BIN, 1)) return 0;
     /* Only the Book shelf's EPUB/TXT files are sent to CrossPod. */
     if (book_kind(path) != 1 && book_kind(path) != 2) return 0;
@@ -711,9 +712,11 @@ void crosspod_poll(void) {
         wheel_raw = 0;
         __sync_lock_test_and_set(&wheel_travel, 0);
         widget_invalidate_force(window_manager(), 0);
-        if (result > 0 && status == (127 << 8) && bk.page && bk.screen != READER) {
-            /* Missing interpreter, missing shared library or invalid executable:
-             * fall back to Q2 Pod's built-in reader for this selected book. */
+        if (result > 0 && !(status & 0x7f) && (status >> 8 & 0xff) != 0 &&
+            bk.page && bk.screen != READER) {
+            /* A failed reader exits nonzero: bypass the launcher just once to
+             * prevent a restart loop, then open Q2 Pod's existing EPUB/TXT reader. */
+            cp.bypass_once = 1;
             to_reader(0);
         }
         return;
